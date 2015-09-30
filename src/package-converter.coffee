@@ -5,12 +5,12 @@ zlib = require 'zlib'
 _ = require 'underscore-plus'
 CSON = require 'season'
 plist = require 'plist'
-request = require 'request'
 {ScopeSelector} = require 'first-mate'
-tar = require 'tar'
+tar = require 'npm/node_modules/tar'
 temp = require 'temp'
 
 fs = require './fs'
+request = require './request'
 
 # Convert a TextMate bundle to an Atom package
 module.exports =
@@ -28,7 +28,7 @@ class PackageConverter
     ]
 
     @directoryMappings = {
-      'Preferences': 'scoped-properties'
+      'Preferences': 'settings'
       'Snippets': 'snippets'
       'Syntaxes': 'grammars'
     }
@@ -47,16 +47,17 @@ class PackageConverter
 
   downloadBundle: (callback) ->
     tempPath = temp.mkdirSync('atom-bundle-')
-    request(@getDownloadUrl())
-      .on 'response', ({headers, statusCode}) ->
+    requestOptions = url: @getDownloadUrl()
+    request.createReadStream requestOptions, (readStream) =>
+      readStream.on 'response', ({headers, statusCode}) ->
         if statusCode isnt 200
           callback("Download failed (#{headers.status})")
-      .pipe(zlib.createGunzip())
-      .pipe(tar.Extract(path: tempPath))
-      .on 'error', (error) -> callback(error)
-      .on 'end', =>
-        sourcePath = path.join(tempPath, fs.readdirSync(tempPath)[0])
-        @copyDirectories(sourcePath, callback)
+
+      readStream.pipe(zlib.createGunzip()).pipe(tar.Extract(path: tempPath))
+        .on 'error', (error) -> callback(error)
+        .on 'end', =>
+          sourcePath = path.join(tempPath, fs.readdirSync(tempPath)[0])
+          @copyDirectories(sourcePath, callback)
 
   copyDirectories: (sourcePath, callback) ->
     sourcePath = path.resolve(sourcePath)
@@ -154,6 +155,9 @@ class PackageConverter
       # with '$1'
       content = content.replace(/\$\{(\d)+:\s*\$\{TM_[^}]+\s*\}\s*\}/g, '$$1')
 
+      # Unescape escaped dollar signs $
+      content = content.replace(/\\\$/g, '$')
+
       unless name?
         extension = path.extname(child)
         name = path.basename(child, extension)
@@ -174,7 +178,7 @@ class PackageConverter
     return unless fs.isDirectorySync(sourcePreferences)
 
     preferencesBySelector = {}
-    destination = path.join(@destinationPath, 'scoped-properties')
+    destination = path.join(@destinationPath, 'settings')
     for child in fs.readdirSync(sourcePreferences)
       {scope, settings} = @readFileSync(path.join(sourcePreferences, child)) ? {}
       continue unless scope and settings
@@ -183,7 +187,10 @@ class PackageConverter
         selector = new ScopeSelector(scope).toCssSelector()
         for key, value of properties
           preferencesBySelector[selector] ?= {}
-          preferencesBySelector[selector][key] = value
+          if preferencesBySelector[selector][key]?
+            preferencesBySelector[selector][key] = _.extend(value, preferencesBySelector[selector][key])
+          else
+            preferencesBySelector[selector][key] = value
 
     @writeFileSync(path.join(destination, "#{packageName}.cson"), preferencesBySelector)
     @normalizeFilenames(destination)

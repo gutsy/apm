@@ -1,13 +1,14 @@
 path = require 'path'
 
 CSON = require 'season'
-optimist = require 'optimist'
+yargs = require 'yargs'
 
+Command = require './command'
+config = require './apm'
 fs = require './fs'
-config = require './config'
 
 module.exports =
-class Unlink
+class Unlink extends Command
   @commandNames: ['unlink']
 
   constructor: ->
@@ -15,7 +16,7 @@ class Unlink
     @packagesPath = path.join(config.getAtomDirectory(), 'packages')
 
   parseOptions: (argv) ->
-    options = optimist(argv)
+    options = yargs(argv).wrap(100)
     options.usage """
 
       Usage: apm unlink [<package_path>]
@@ -30,8 +31,6 @@ class Unlink
     options.boolean('hard').describe('hard', 'Unlink package from ~/.atom/packages and ~/.atom/dev/packages')
     options.alias('a', 'all').boolean('all').describe('all', 'Unlink all packages in ~/.atom/packages and ~/.atom/dev/packages')
 
-  showHelp: (argv) -> @parseOptions(argv).showHelp()
-
   getDevPackagePath: (packageName) -> path.join(@devPackagesPath, packageName)
 
   getPackagePath: (packageName) -> path.join(@packagesPath, packageName)
@@ -40,9 +39,9 @@ class Unlink
     try
       process.stdout.write "Unlinking #{pathToUnlink} "
       fs.unlinkSync(pathToUnlink) if fs.isSymbolicLinkSync(pathToUnlink)
-      process.stdout.write '\u2713\n'.green
+      @logSuccess()
     catch error
-      process.stdout.write '\u2717\n'.red
+      @logFailure()
       throw error
 
   unlinkAll: (options, callback) ->
@@ -59,7 +58,9 @@ class Unlink
       callback(error)
 
   unlinkPackage: (options, callback) ->
-    linkPath = path.resolve(process.cwd(), options.argv._[0] ? '.')
+    packagePath = options.argv._[0]?.toString() ? '.'
+    linkPath = path.resolve(process.cwd(), packagePath)
+
     try
       packageName = CSON.readFileSync(CSON.resolve(path.join(linkPath, 'package'))).name
     packageName = path.basename(linkPath) unless packageName

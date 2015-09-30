@@ -2,32 +2,33 @@ path = require 'path'
 
 _ = require 'underscore-plus'
 async = require 'async'
-optimist = require 'optimist'
+yargs = require 'yargs'
 read = require 'read'
-request = require 'request'
-semver = require 'semver'
+semver = require 'npm/node_modules/semver'
 
 Command = require './command'
-config = require './config'
+config = require './apm'
 fs = require './fs'
 Install = require './install'
 Packages = require './packages'
+request = require './request'
 tree = require './tree'
 
 module.exports =
 class Upgrade extends Command
-  @commandNames: ['upgrade', 'outdated']
+  @commandNames: ['upgrade', 'outdated', 'update']
 
   constructor: ->
     @atomDirectory = config.getAtomDirectory()
     @atomPackagesDirectory = path.join(@atomDirectory, 'packages')
 
   parseOptions: (argv) ->
-    options = optimist(argv)
+    options = yargs(argv).wrap(100)
     options.usage """
 
       Usage: apm upgrade
              apm upgrade --list
+             apm upgrade [<package_name>...]
 
       Upgrade out of date packages installed to ~/.atom/packages
 
@@ -39,12 +40,18 @@ class Upgrade extends Command
     options.alias('l', 'list').boolean('list').describe('list', 'List but don\'t install the outdated packages')
     options.boolean('json').describe('json', 'Output outdated packages as a JSON array')
     options.string('compatible').describe('compatible', 'Only list packages/themes compatible with this Atom version')
+    options.boolean('verbose').default('verbose', false).describe('verbose', 'Show verbose debug information')
 
-  getInstalledPackages: ->
+  getInstalledPackages: (options) ->
     packages = []
     for name in fs.list(@atomPackagesDirectory)
       if pack = @getIntalledPackage(name)
         packages.push(pack)
+
+    packageNames = @packageNamesFromArgv(options.argv)
+    if packageNames.length > 0
+      packages = packages.filter ({name}) -> packageNames.indexOf(name) isnt -1
+
     packages
 
   getIntalledPackage: (name) ->
@@ -57,20 +64,16 @@ class Upgrade extends Command
   loadInstalledAtomVersion: (options, callback) ->
     if options.argv.compatible
       process.nextTick =>
-        @installedAtomVersion = options.argv.compatible if semver.valid(options.argv.compatible)
+        version = @normalizeVersion(options.argv.compatible)
+        @installedAtomVersion = version if semver.valid(version)
         callback()
     else
-      config.getResourcePath (resourcePath) =>
-        try
-          {version} = require(path.join(resourcePath, 'package.json')) ? {}
-          @installedAtomVersion = version if semver.valid(version)
-        callback()
+      @loadInstalledAtomMetadata(callback)
 
   getLatestVersion: (pack, callback) ->
     requestSettings =
       url: "#{config.getAtomPackagesUrl()}/#{pack.name}"
       json: true
-      proxy: process.env.http_proxy || process.env.https_proxy
     request.get requestSettings, (error, response, body={}) =>
       if error?
         callback("Request for package information failed: #{error.message}")
@@ -92,18 +95,16 @@ class Upgrade extends Command
 
           latestVersion = version if semver.gt(version, latestVersion)
 
-        if latestVersion isnt pack.version and @repositoriesMatch(pack, body)
+        if latestVersion isnt pack.version and @hasRepo(pack)
           callback(null, {pack, latestVersion})
         else
           callback()
 
-  repositoriesMatch: (packageA, packageB) ->
-    repoA = Packages.getRepository(packageA)
-    repoB = Packages.getRepository(packageB)
-    repoA and repoB and repoA is repoB
+  hasRepo: (pack) ->
+    Packages.getRepository(pack)?
 
   getAvailableUpdates: (packages, callback) ->
-    async.map packages, @getLatestVersion.bind(this), (error, updates) =>
+    async.map packages, @getLatestVersion.bind(this), (error, updates) ->
       return callback(error) if error?
 
       updates = _.compact(updates)
@@ -119,13 +120,13 @@ class Upgrade extends Command
 
   installUpdates: (updates, callback) ->
     installCommands = []
+    verbose = @verbose
     for {pack, latestVersion} in updates
       do (pack, latestVersion) ->
         installCommands.push (callback) ->
-          options =
-            callback: callback
-            commandArgs: ["#{pack.name}@#{latestVersion}"]
-          new Install().run(options)
+          commandArgs = ["#{pack.name}@#{latestVersion}"]
+          commandArgs.unshift('--verbose') if verbose
+          new Install().run({callback, commandArgs})
 
     async.waterfall(installCommands, callback)
 
@@ -134,6 +135,11 @@ class Upgrade extends Command
     options = @parseOptions(options.commandArgs)
     options.command = command
 
+    @verbose = options.argv.verbose
+    if @verbose
+      request.debug(true)
+      process.env.NODE_DEBUG = 'request'
+
     @loadInstalledAtomVersion options, =>
       if @installedAtomVersion
         @upgradePackages(options, callback)
@@ -141,7 +147,7 @@ class Upgrade extends Command
         callback('Could not determine current Atom version installed')
 
   upgradePackages: (options, callback) ->
-    packages = @getInstalledPackages()
+    packages = @getInstalledPackages(options)
     @getAvailableUpdates packages, (error, updates) =>
       return callback(error) if error?
 

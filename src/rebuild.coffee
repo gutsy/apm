@@ -1,9 +1,9 @@
 path = require 'path'
 
 _ = require 'underscore-plus'
-optimist = require 'optimist'
+yargs = require 'yargs'
 
-config = require './config'
+config = require './apm'
 Command = require './command'
 Install = require './install'
 
@@ -16,35 +16,60 @@ class Rebuild extends Command
     @atomNpmPath = require.resolve('npm/bin/npm-cli')
 
   parseOptions: (argv) ->
-    options = optimist(argv)
+    options = yargs(argv).wrap(100)
     options.usage """
 
-      Usage: apm rebuild
+      Usage: apm rebuild [<name> [<name> ...]]
 
-      Rebuild all the modules currently installed in the node_modules folder
+      Rebuild the given modules currently installed in the node_modules folder
       in the current working directory.
+
+      All the modules will be rebuilt if no module names are specified.
     """
     options.alias('h', 'help').describe('help', 'Print this usage message')
 
-  showHelp: (argv) -> @parseOptions(argv).showHelp()
+  installNode: (callback) ->
+    config.loadNpm (error, npm) ->
+      install = new Install()
+      install.npm = npm
+      install.loadInstalledAtomMetadata -> install.installNode(callback)
 
-  run: ({callback}) ->
-    new Install().installNode (error) =>
-      if error?
-        callback(error)
-      else
-        process.stdout.write 'Rebuilding modules '
+  forkNpmRebuild: (options, callback) ->
+    process.stdout.write 'Rebuilding modules '
 
-        rebuildArgs = ['rebuild']
-        rebuildArgs.push("--target=#{config.getNodeVersion()}")
-        rebuildArgs.push("--arch=#{config.getNodeArch()}")
-        env = _.extend({}, process.env, HOME: @atomNodeDirectory)
-        env.USERPROFILE = env.HOME if config.isWin32()
+    rebuildArgs = [
+      '--globalconfig'
+      config.getGlobalConfigPath()
+      '--userconfig'
+      config.getUserConfigPath()
+      'rebuild'
+      "--target=#{@electronVersion}"
+      "--arch=#{config.getElectronArch()}"
+    ]
+    rebuildArgs = rebuildArgs.concat(options.argv._)
 
-        @fork @atomNpmPath, rebuildArgs, {env}, (code, stderr='') ->
-          if code is 0
-            process.stdout.write '\u2713\n'.green
-            callback()
-          else
-            process.stdout.write '\u2717\n'.red
-            callback(stderr)
+    if vsArgs = @getVisualStudioFlags()
+      rebuildArgs.push(vsArgs)
+
+    env = _.extend({}, process.env, HOME: @atomNodeDirectory)
+    env.USERPROFILE = env.HOME if config.isWin32()
+    @addBuildEnvVars(env)
+
+    @fork(@atomNpmPath, rebuildArgs, {env}, callback)
+
+  run: (options) ->
+    {callback} = options
+    options = @parseOptions(options.commandArgs)
+
+    config.loadNpm (error, @npm) =>
+      @loadInstalledAtomMetadata =>
+        @installNode (error) =>
+          return callback(error) if error?
+
+          @forkNpmRebuild options, (code, stderr='') =>
+            if code is 0
+              @logSuccess()
+              callback()
+            else
+              @logFailure()
+              callback(stderr)

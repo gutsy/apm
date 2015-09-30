@@ -7,6 +7,7 @@ describe 'apm uninstall', ->
   beforeEach ->
     silenceOutput()
     spyOnToken()
+    process.env.ATOM_API_URL = 'http://localhost:5432'
 
   describe 'when no package is specified', ->
     it 'logs an error and exits', ->
@@ -18,7 +19,7 @@ describe 'apm uninstall', ->
 
       runs ->
         expect(console.error.mostRecentCall.args[0].length).toBeGreaterThan 0
-        expect(process.exit.mostRecentCall.args[0]).toBe 1
+        expect(callback.mostRecentCall.args[0]).not.toBeUndefined()
 
   describe 'when the package is not installed', ->
     it 'ignores the package', ->

@@ -1,17 +1,18 @@
 _ = require 'underscore-plus'
-optimist = require 'optimist'
-request = require 'request'
+yargs = require 'yargs'
 
 Command = require './command'
-config = require './config'
+config = require './apm'
+request = require './request'
 tree = require './tree'
+{isDeprecatedPackage} = require './deprecated-packages'
 
 module.exports =
 class Search extends Command
   @commandNames: ['search']
 
   parseOptions: (argv) ->
-    options = optimist(argv)
+    options = yargs(argv).wrap(100)
     options.usage """
 
       Usage: apm search <package_name>
@@ -36,18 +37,17 @@ class Search extends Command
       url: "#{config.getAtomPackagesUrl()}/search"
       qs: qs
       json: true
-      proxy: process.env.http_proxy || process.env.https_proxy
 
     request.get requestSettings, (error, response, body={}) ->
       if error?
         callback(error)
       else if response.statusCode is 200
         packages = body.filter (pack) -> pack.releases?.latest?
-        packages = packages.map ({readme, metadata, downloads}) -> _.extend({}, metadata, {readme, downloads})
-        packages = _.sortBy(packages, 'name')
+        packages = packages.map ({readme, metadata, downloads, stargazers_count}) -> _.extend({}, metadata, {readme, downloads, stargazers_count})
+        packages = packages.filter ({name, version}) -> not isDeprecatedPackage(name, version)
         callback(null, packages)
       else
-        message = body.message ? body.error ? body
+        message = request.getErrorMessage(response, body)
         callback("Searching packages failed: #{message}")
 
   run: (options) ->
@@ -74,10 +74,10 @@ class Search extends Command
         heading = "Search Results For '#{query}'".cyan
         console.log "#{heading} (#{packages.length})"
 
-        tree packages, ({name, version, description, downloads}) ->
+        tree packages, ({name, version, description, downloads, stargazers_count}) ->
           label = name.yellow
           label += " #{description.replace(/\s+/g, ' ')}" if description
-          label += " (#{_.pluralize(downloads, 'download')})".grey if downloads >= 0
+          label += " (#{_.pluralize(downloads, 'download')}, #{_.pluralize(stargazers_count, 'star')})".grey if downloads >= 0 and stargazers_count >= 0
           label
 
         console.log()

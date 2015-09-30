@@ -1,17 +1,18 @@
 _ = require 'underscore-plus'
-optimist = require 'optimist'
-request = require 'request'
+yargs = require 'yargs'
+semver = require 'npm/node_modules/semver'
 
 Command = require './command'
-config = require './config'
+config = require './apm'
+request = require './request'
 tree = require './tree'
 
 module.exports =
-class Search extends Command
+class View extends Command
   @commandNames: ['view', 'show']
 
   parseOptions: (argv) ->
-    options = optimist(argv)
+    options = yargs(argv).wrap(100)
     options.usage """
 
       Usage: apm view <package_name>
@@ -20,23 +21,50 @@ class Search extends Command
     """
     options.alias('h', 'help').describe('help', 'Print this usage message')
     options.boolean('json').describe('json', 'Output featured packages as JSON array')
+    options.string('compatible').describe('compatible', 'Show the latest version compatible with this Atom version')
+
+  loadInstalledAtomVersion: (options, callback) ->
+    process.nextTick =>
+      if options.argv.compatible
+        version = @normalizeVersion(options.argv.compatible)
+        installedAtomVersion = version if semver.valid(version)
+      callback(installedAtomVersion)
+
+  getLatestCompatibleVersion: (pack, options, callback) ->
+    @loadInstalledAtomVersion options, (installedAtomVersion) ->
+      return callback(pack.releases.latest) unless installedAtomVersion
+
+      latestVersion = null
+      for version, metadata of pack.versions ? {}
+        continue unless semver.valid(version)
+        continue unless metadata
+
+        engine = metadata.engines?.atom ? '*'
+        continue unless semver.validRange(engine)
+        continue unless semver.satisfies(installedAtomVersion, engine)
+
+        latestVersion ?= version
+        latestVersion = version if semver.gt(version, latestVersion)
+
+      callback(latestVersion)
 
   getRepository: (pack) ->
     if repository = pack.repository?.url ? pack.repository
       repository.replace(/\.git$/, '')
 
-  getPackage: (packageName, callback) ->
+  getPackage: (packageName, options, callback) ->
     requestSettings =
       url: "#{config.getAtomPackagesUrl()}/#{packageName}"
       json: true
-      proxy: process.env.http_proxy || process.env.https_proxy
-    request.get requestSettings, (error, response, body={}) ->
+    request.get requestSettings, (error, response, body={}) =>
       if error?
         callback(error)
       else if response.statusCode is 200
-        {metadata, readme, repository, downloads} = body
-        pack = _.extend({}, metadata, {readme, downloads})
-        callback(null, pack)
+        @getLatestCompatibleVersion body, options, (version) ->
+          {name, readme, downloads, stargazers_count} = body
+          metadata = body.versions?[version] ? {name}
+          pack = _.extend({}, metadata, {readme, downloads, stargazers_count})
+          callback(null, pack)
       else
         message = body.message ? body.error ? body
         callback("Requesting package failed: #{message}")
@@ -50,7 +78,7 @@ class Search extends Command
       callback("Missing required package name")
       return
 
-    @getPackage packageName, (error, pack) =>
+    @getPackage packageName, options, (error, pack) =>
       if error?
         callback(error)
         return
@@ -66,6 +94,8 @@ class Search extends Command
         items.push(pack.description.replace(/\s+/g, ' ')) if pack.description
         if pack.downloads >= 0
           items.push(_.pluralize(pack.downloads, 'download'))
+        if pack.stargazers_count >= 0
+          items.push(_.pluralize(pack.stargazers_count, 'star'))
 
         tree(items)
 

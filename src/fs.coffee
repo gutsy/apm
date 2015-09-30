@@ -1,6 +1,7 @@
-fs = require 'fs-plus'
 _ = require 'underscore-plus'
-runas = null
+fs = require 'fs-plus'
+ncp = require 'ncp'
+rm = require 'npm/node_modules/rimraf'
 wrench = require 'wrench'
 
 fsAdditions =
@@ -16,14 +17,11 @@ fsAdditions =
   listRecursive: (directoryPath) ->
     wrench.readdirSyncRecursive(directoryPath)
 
-  cp: (sourcePath, destinationPath, options) ->
-    wrench.copyDirSyncRecursive(sourcePath, destinationPath, options)
-
-  safeSymlinkSync: (source, target) ->
-    if process.platform is 'win32'
-      runas ?= require 'runas'
-      runas('cmd', ['/K', "mklink /d \"#{target}\" \"#{source}\" & exit"], hide: true)
-    else
-      fs.symlinkSync(source, target)
+  cp: (sourcePath, destinationPath, callback) ->
+    rm destinationPath, (error) ->
+      if error?
+        callback(error)
+      else
+        ncp(sourcePath, destinationPath, callback)
 
 module.exports = _.extend({}, fs, fsAdditions)

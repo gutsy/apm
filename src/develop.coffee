@@ -2,13 +2,14 @@ fs = require 'fs'
 path = require 'path'
 
 _ = require 'underscore-plus'
-optimist = require 'optimist'
-request = require 'request'
+yargs = require 'yargs'
 
-config = require './config'
+config = require './apm'
 Command = require './command'
 Install = require './install'
+git = require './git'
 Link = require './link'
+request = require './request'
 
 module.exports =
 class Develop extends Command
@@ -19,14 +20,14 @@ class Develop extends Command
     @atomDevPackagesDirectory = path.join(@atomDirectory, 'dev', 'packages')
 
   parseOptions: (argv) ->
-    options = optimist(argv)
+    options = yargs(argv).wrap(100)
 
     options.usage """
       Usage: apm develop <package_name> [<directory>]
 
       Clone the given package's Git repository to the directory specified,
       install its dependencies, and link it for development to
-      ~/.atom/packages/dev/<package_name>.
+      ~/.atom/dev/packages/<package_name>.
 
       If no directory is specified then the repository is cloned to
       ~/github/<package_name>. The default folder to clone packages into can
@@ -41,7 +42,6 @@ class Develop extends Command
     requestSettings =
       url: "#{config.getAtomPackagesUrl()}/#{packageName}"
       json: true
-      proxy: process.env.http_proxy || process.env.https_proxy
     request.get requestSettings, (error, response, body={}) ->
       if error?
         callback("Request for package information failed: #{error.message}")
@@ -51,20 +51,22 @@ class Develop extends Command
         else
           callback("No repository URL found for package: #{packageName}")
       else
-        message = body.message ? body.error ? body
+        message = request.getErrorMessage(response, body)
         callback("Request for package information failed: #{message}")
 
   cloneRepository: (repoUrl, packageDirectory, options) ->
-    command = "git"
-    args = ['clone', '--recursive', repoUrl, packageDirectory]
-    process.stdout.write "Cloning #{repoUrl} "
-    @spawn command, args, (code, stderr='', stdout='') =>
-      if code is 0
-        process.stdout.write '\u2713\n'.green
-        @installDependencies(packageDirectory, options)
-      else
-        process.stdout.write '\u2717\n'.red
-        options.callback("#{stdout}\n#{stderr}")
+    config.getSetting 'git', (command) =>
+      command ?= 'git'
+      args = ['clone', '--recursive', repoUrl, packageDirectory]
+      process.stdout.write "Cloning #{repoUrl} "
+      git.addGitToEnv(process.env)
+      @spawn command, args, (code, stderr='', stdout='') =>
+        if code is 0
+          @logSuccess()
+          @installDependencies(packageDirectory, options)
+        else
+          @logFailure()
+          options.callback("#{stdout}\n#{stderr}".trim())
 
   installDependencies: (packageDirectory, options) ->
     process.chdir(packageDirectory)

@@ -1,10 +1,10 @@
 path = require 'path'
 
 CSON = require 'season'
-optimist = require 'optimist'
+yargs = require 'yargs'
 
 Command = require './command'
-config = require './config'
+config = require './apm'
 fs = require './fs'
 
 module.exports =
@@ -12,7 +12,7 @@ class Link extends Command
   @commandNames: ['link', 'ln']
 
   parseOptions: (argv) ->
-    options = optimist(argv)
+    options = yargs(argv).wrap(100)
     options.usage """
 
       Usage: apm link [<package_path>]
@@ -29,7 +29,9 @@ class Link extends Command
     {callback} = options
     options = @parseOptions(options.commandArgs)
 
-    linkPath = path.resolve(process.cwd(), options.argv._[0] ? '.')
+    packagePath = options.argv._[0]?.toString() ? '.'
+    linkPath = path.resolve(process.cwd(), packagePath)
+
     try
       packageName = CSON.readFileSync(CSON.resolve(path.join(linkPath, 'package'))).name
     packageName = path.basename(linkPath) unless packageName
@@ -46,7 +48,7 @@ class Link extends Command
     try
       fs.unlinkSync(targetPath) if fs.isSymbolicLinkSync(targetPath)
       fs.makeTreeSync path.dirname(targetPath)
-      fs.safeSymlinkSync(linkPath, targetPath)
+      fs.symlinkSync(linkPath, targetPath, 'junction')
       console.log "#{targetPath} -> #{linkPath}"
       callback()
     catch error

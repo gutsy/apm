@@ -1,66 +1,45 @@
-child_process = require 'child_process'
-fs = require 'fs'
 path = require 'path'
+_ = require 'underscore-plus'
+yargs = require 'yargs'
+apm = require './apm'
+Command = require './command'
 
 module.exports =
-  getHomeDirectory: ->
-    if process.platform is 'win32' then process.env.USERPROFILE else process.env.HOME
+class Config extends Command
+  @commandNames: ['config']
 
-  getAtomDirectory: ->
-    process.env.ATOM_HOME ? path.join(@getHomeDirectory(), '.atom')
+  constructor: ->
+    atomDirectory = apm.getAtomDirectory()
+    @atomNodeDirectory = path.join(atomDirectory, '.node-gyp')
+    @atomNpmPath = require.resolve('npm/bin/npm-cli')
 
-  getPackageCacheDirectory: ->
-    path.join(@getAtomDirectory(), '.node-gyp', '.atom', '.apm')
+  parseOptions: (argv) ->
+    options = yargs(argv).wrap(100)
+    options.usage """
 
-  getResourcePath: (callback) ->
-    if process.env.ATOM_RESOURCE_PATH
-      process.nextTick -> callback(process.env.ATOM_RESOURCE_PATH)
-    else
-      if process.platform is 'darwin'
-        child_process.exec 'mdfind "kMDItemCFBundleIdentifier == \'com.github.atom\'"', (error, stdout='', stderr) ->
-          appLocation = stdout.split('\n')[0] ? '/Applications/Atom.app'
-          callback("#{appLocation}/Contents/Resources/app")
+      Usage: apm config set <key> <value>
+             apm config get <key>
+             apm config delete <key>
+             apm config list
+             apm config edit
+
+    """
+    options.alias('h', 'help').describe('help', 'Print this usage message')
+
+  run: (options) ->
+    {callback} = options
+    options = @parseOptions(options.commandArgs)
+
+    configArgs = ['--globalconfig', apm.getGlobalConfigPath(), '--userconfig', apm.getUserConfigPath(), 'config']
+    configArgs = configArgs.concat(options.argv._)
+
+    env = _.extend({}, process.env, HOME: @atomNodeDirectory)
+    configOptions = {env}
+
+    @fork @atomNpmPath, configArgs, configOptions, (code, stderr='', stdout='') ->
+      if code is 0
+        process.stdout.write(stdout) if stdout
+        callback()
       else
-        process.nextTick -> callback('/usr/local/share/atom/resources/app')
-
-  getReposDirectory: ->
-    process.env.ATOM_REPOS_HOME ? path.join(@getHomeDirectory(), 'github')
-
-  getNodeUrl: ->
-    process.env.ATOM_NODE_URL ? 'https://gh-contractor-zcbenz.s3.amazonaws.com/atom-shell/dist'
-
-  getAtomPackagesUrl: ->
-    process.env.ATOM_PACKAGES_URL ? 'https://atom.io/api/packages'
-
-  getNodeVersion: ->
-    process.env.ATOM_NODE_VERSION ? '0.11.10'
-
-  getNodeArch: ->
-    switch process.platform
-      when 'darwin' then 'x64'
-      when 'win32' then 'ia32'
-      else process.arch  # On BSD and Linux we use current machine's arch.
-
-  getUserConfigPath: ->
-    path.resolve(__dirname, '..', '.apmrc')
-
-  isWin32: ->
-    !!process.platform.match(/^win/)
-
-  isWindows64Bit: ->
-    fs.existsSync "C:\\Windows\\SysWow64\\Notepad.exe"
-
-  x86ProgramFilesDirectory: ->
-    process.env["ProgramFiles(x86)"] or process.env["ProgramFiles"]
-
-  isVs2010Installed: ->
-    return false unless @isWin32()
-
-    vsPath = path.join @x86ProgramFilesDirectory(), "Microsoft Visual Studio 10.0", "Common7", "IDE"
-    fs.existsSync vsPath
-
-  isVs2012Installed: ->
-    return false unless @isWin32()
-
-    vsPath = path.join @x86ProgramFilesDirectory(), "Microsoft Visual Studio 11.0", "Common7", "IDE"
-    fs.existsSync vsPath
+        process.stdout.write(stderr) if stderr
+        callback(new Error("npm config failed: #{code}"))

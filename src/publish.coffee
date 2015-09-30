@@ -1,15 +1,16 @@
 path = require 'path'
+url = require 'url'
 
-optimist = require 'optimist'
+yargs = require 'yargs'
 Git = require 'git-utils'
-request = require 'request'
+semver = require 'npm/node_modules/semver'
 
-auth = require './auth'
 fs = require './fs'
-config = require './config'
+config = require './apm'
 Command = require './command'
 Login = require './login'
 Packages = require './packages'
+request = require './request'
 
 module.exports =
 class Publish extends Command
@@ -20,11 +21,12 @@ class Publish extends Command
     @atomNpmPath = require.resolve('npm/bin/npm-cli')
 
   parseOptions: (argv) ->
-    options = optimist(argv)
+    options = yargs(argv).wrap(100)
     options.usage """
 
       Usage: apm publish [<newversion> | major | minor | patch | build]
              apm publish --tag <tagname>
+             apm publish --rename <new-name>
 
       Publish a new version of the package in the current working directory.
 
@@ -33,21 +35,16 @@ class Publish extends Command
       it is published to the apm registry. The HEAD branch and the new tag are
       pushed up to the remote repository automatically using this option.
 
+      If a new name is provided via the --rename flag, the package.json file is
+      updated with the new name and the package's name is updated on Atom.io.
+
       Run `apm featured` to see all the featured packages or
       `apm view <packagename>` to see information about your package after you
       have published it.
     """
     options.alias('h', 'help').describe('help', 'Print this usage message')
     options.alias('t', 'tag').string('tag').describe('tag', 'Specify a tag to publish')
-
-  showHelp: (argv) -> @parseOptions(argv).showHelp()
-
-  getToken: (callback) ->
-    auth.getToken (error, token) ->
-      if error?
-        new Login().run({callback, commandArgs: []})
-      else
-        callback(null, token)
+    options.alias('r', 'rename').string('rename').describe('rename', 'Specify a new name for the package')
 
   # Create a new version and tag use the `npm version` command.
   #
@@ -57,13 +54,13 @@ class Publish extends Command
   versionPackage: (version, callback) ->
     process.stdout.write 'Preparing and tagging a new version '
     versionArgs = ['version', version, '-m', 'Prepare %s release']
-    @fork @atomNpmPath, versionArgs, (code, stderr='', stdout='') ->
+    @fork @atomNpmPath, versionArgs, (code, stderr='', stdout='') =>
       if code is 0
-        process.stdout.write '\u2713\n'.green
+        @logSuccess()
         callback(null, stdout.trim())
       else
-        process.stdout.write '\u2717\n'.red
-        callback("#{stdout}\n#{stderr}")
+        @logFailure()
+        callback("#{stdout}\n#{stderr}".trim())
 
   # Push a tag to the remote repository.
   #
@@ -73,13 +70,8 @@ class Publish extends Command
   pushVersion: (tag, callback) ->
     process.stdout.write "Pushing #{tag} tag "
     pushArgs = ['push', 'origin', 'HEAD', tag]
-    @spawn 'git', pushArgs, (code, stderr='', stdout='') ->
-      if code is 0
-        process.stdout.write '\u2713\n'.green
-        callback()
-      else
-        process.stdout.write '\u2717\n'.red
-        callback("#{stdout}\n#{stderr}")
+    @spawn 'git', pushArgs, (args...) =>
+      @logCommandResults(callback, args...)
 
   # Check for the tag being available from the GitHub API before notifying
   # atom.io about the new version.
@@ -97,13 +89,10 @@ class Publish extends Command
     requestSettings =
       url: "https://api.github.com/repos/#{Packages.getRepository(pack)}/tags"
       json: true
-      proxy: process.env.http_proxy || process.env.https_proxy
-      headers:
-        'User-Agent': "AtomApm/#{require('../package.json').version}"
 
     requestTags = ->
       request.get requestSettings, (error, response, tags=[]) ->
-        if response.statusCode is 200
+        if response?.statusCode is 200
           for {name}, index in tags when name is tag
             return callback()
         if --retryCount <= 0
@@ -118,15 +107,12 @@ class Publish extends Command
   # callback    - The callback function invoke with an error as the first
   #               argument and true/false as the second argument.
   packageExists: (packageName, callback) ->
-    @getToken (error, token) ->
-      if error?
-        callback(error)
-        return
+    Login.getTokenOrLogin (error, token) ->
+      return callback(error) if error?
 
       requestSettings =
         url: "#{config.getAtomPackagesUrl()}/#{packageName}"
         json: true
-        proxy: process.env.http_proxy || process.env.https_proxy
         headers:
           authorization: token
       request.get requestSettings, (error, response, body={}) ->
@@ -153,30 +139,28 @@ class Publish extends Command
         return
 
       process.stdout.write "Registering #{pack.name} "
-      @getToken (error, token) ->
+      Login.getTokenOrLogin (error, token) =>
         if error?
-          process.stdout.write '\u2717\n'.red
+          @logFailure()
           callback(error)
           return
 
         requestSettings =
           url: config.getAtomPackagesUrl()
           json: true
-          method: 'POST'
-          proxy: process.env.http_proxy || process.env.https_proxy
           body:
             repository: repository
           headers:
             authorization: token
-        request.get requestSettings, (error, response, body={}) ->
+        request.post requestSettings, (error, response, body={}) =>
           if error?
             callback(error)
           else if response.statusCode isnt 201
-            message = body.message ? body.error ? body
-            process.stdout.write '\u2717\n'.red
+            message = request.getErrorMessage(response, body)
+            @logFailure()
             callback("Registering package in #{repository} repository failed: #{message}")
           else
-            process.stdout.write '\u2713\n'.green
+            @logSuccess()
             callback(null, true)
 
   # Create a new package version at the given Git tag.
@@ -185,8 +169,8 @@ class Publish extends Command
   # tag - The string Git tag of the new version.
   # callback - The callback function to invoke with an error as the first
   #            argument.
-  createPackageVersion: (packageName, tag, callback) ->
-    @getToken (error, token) ->
+  createPackageVersion: (packageName, tag, options, callback) ->
+    Login.getTokenOrLogin (error, token) ->
       if error?
         callback(error)
         return
@@ -194,17 +178,16 @@ class Publish extends Command
       requestSettings =
         url: "#{config.getAtomPackagesUrl()}/#{packageName}/versions"
         json: true
-        method: 'POST'
-        proxy: process.env.http_proxy || process.env.https_proxy
         body:
           tag: tag
+          rename: options.rename
         headers:
           authorization: token
-      request.get requestSettings, (error, response, body={}) ->
+      request.post requestSettings, (error, response, body={}) ->
         if error?
           callback(error)
         else if response.statusCode isnt 201
-          message = body.message ? body.error ? body
+          message = request.getErrorMessage(response, body)
           callback("Creating new version failed: #{message}")
         else
           callback()
@@ -213,16 +196,21 @@ class Publish extends Command
   #
   # pack - The package metadata.
   # tag - The Git tag string of the package version to publish.
+  # options - An options Object (optional).
   # callback - The callback function to invoke when done with an error as the
   #            first argument.
-  publishPackage: (pack, tag, callback) ->
-    process.stdout.write "Publishing #{pack.name}@#{tag} "
-    @createPackageVersion pack.name, tag, (error) ->
+  publishPackage: (pack, tag, remaining...) ->
+    options = remaining.shift() if remaining.length >= 2
+    options ?= {}
+    callback = remaining.shift()
+
+    process.stdout.write "Publishing #{options.rename or pack.name}@#{tag} "
+    @createPackageVersion pack.name, tag, options, (error) =>
       if error?
-        process.stdout.write '\u2717\n'.red
+        @logFailure()
         callback(error)
       else
-        process.stdout.write '\u2713\n'.green
+        @logSuccess()
         callback()
 
   logFirstTimePublishMessage: (pack) ->
@@ -243,21 +231,95 @@ class Publish extends Command
     catch error
       throw new Error("Error parsing package.json file: #{error.message}")
 
+  saveMetadata: (pack, callback) ->
+    metadataPath = path.resolve('package.json')
+    metadataJson = JSON.stringify(pack, null, 2)
+    fs.writeFile(metadataPath, "#{metadataJson}\n", callback)
+
   loadRepository: ->
     currentDirectory = process.cwd()
 
     repo = Git.open(currentDirectory)
-    if repo?.getWorkingDirectory().toLowerCase() isnt currentDirectory.toLowerCase()
+    unless repo?.isWorkingDirectory(currentDirectory)
       throw new Error('Package must be in a Git repository before publishing: https://help.github.com/articles/create-a-repo')
 
-    unless repo.getConfigValue('remote.origin.url')
+
+    if currentBranch = repo.getShortHead()
+      remoteName = repo.getConfigValue("branch.#{currentBranch}.remote")
+    remoteName ?= repo.getConfigValue('branch.master.remote')
+
+    upstreamUrl = repo.getConfigValue("remote.#{remoteName}.url") if remoteName
+    upstreamUrl ?= repo.getConfigValue('remote.origin.url')
+
+    unless upstreamUrl
       throw new Error('Package must pushed up to GitHub before publishing: https://help.github.com/articles/create-a-repo')
+
+  # Rename package if necessary
+  renamePackage: (pack, name, callback) ->
+    if name?.length > 0
+      return callback('The new package name must be different than the name in the package.json file') if pack.name is name
+
+      message = "Renaming #{pack.name} to #{name} "
+      process.stdout.write(message)
+      @setPackageName pack, name, (error) =>
+        if error?
+          @logFailure()
+          return callback(error)
+
+        config.getSetting 'git', (gitCommand) =>
+          gitCommand ?= 'git'
+          @spawn gitCommand, ['add', 'package.json'], (code, stderr='', stdout='') =>
+            unless code is 0
+              @logFailure()
+              addOutput = "#{stdout}\n#{stderr}".trim()
+              return callback("`git add package.json` failed: #{addOutput}")
+
+            @spawn gitCommand, ['commit', '-m', message], (code, stderr='', stdout='') =>
+              if code is 0
+                @logSuccess()
+                callback()
+              else
+                @logFailure()
+                commitOutput = "#{stdout}\n#{stderr}".trim()
+                callback("Failed to commit package.json: #{commitOutput}")
+    else
+      # Just fall through if the name is empty
+      callback()
+
+  setPackageName: (pack, name, callback) ->
+    pack.name = name
+    @saveMetadata(pack, callback)
+
+  validateSemverRanges: (pack) ->
+    return unless pack
+
+    isValidRange = (semverRange) ->
+      return true if semver.validRange(semverRange)
+
+      try
+        return true if url.parse(semverRange).protocol.length > 0
+
+      semverRange is 'latest'
+
+    if pack.engines?.atom?
+      unless semver.validRange(pack.engines.atom)
+        throw new Error("The Atom engine range in the package.json file is invalid: #{pack.engines.atom}")
+
+    for packageName, semverRange of pack.dependencies
+      unless isValidRange(semverRange)
+        throw new Error("The #{packageName} dependency range in the package.json file is invalid: #{semverRange}")
+
+    for packageName, semverRange of pack.devDependencies
+      unless isValidRange(semverRange)
+        throw new Error("The #{packageName} dev dependency range in the package.json file is invalid: #{semverRange}")
+
+    return
 
   # Run the publish command with the given options
   run: (options) ->
     {callback} = options
     options = @parseOptions(options.commandArgs)
-    {tag} = options.argv
+    {tag, rename} = options.argv
     [version] = options.argv._
 
     try
@@ -266,26 +328,42 @@ class Publish extends Command
       return callback(error)
 
     try
+      @validateSemverRanges(pack)
+    catch error
+      return callback(error)
+
+    try
       @loadRepository()
     catch error
       return callback(error)
 
-    if version?.length > 0
+    if version?.length > 0 or rename?.length > 0
+      version = 'patch' unless version?.length > 0
+      originalName = pack.name if rename?.length > 0
+
       @registerPackage pack, (error, firstTimePublishing) =>
         return callback(error) if error?
 
-        @versionPackage version, (error, tag) =>
+        @renamePackage pack, rename, (error) =>
           return callback(error) if error?
 
-          @pushVersion tag, (error) =>
+          @versionPackage version, (error, tag) =>
             return callback(error) if error?
 
-            @waitForTagToBeAvailable pack, tag, =>
+            @pushVersion tag, (error) =>
+              return callback(error) if error?
 
-              @publishPackage pack, tag, (error) =>
-                if firstTimePublishing and not error?
-                  @logFirstTimePublishMessage(pack)
-                callback(error)
+              @waitForTagToBeAvailable pack, tag, =>
+
+                if originalName?
+                  # If we're renaming a package, we have to hit the API with the
+                  # current name, not the new one, or it will 404.
+                  rename = pack.name
+                  pack.name = originalName
+                @publishPackage pack, tag, {rename},  (error) =>
+                  if firstTimePublishing and not error?
+                    @logFirstTimePublishMessage(pack)
+                  callback(error)
     else if tag?.length > 0
       @registerPackage pack, (error, firstTimePublishing) =>
         return callback(error) if error?
@@ -295,4 +373,4 @@ class Publish extends Command
             @logFirstTimePublishMessage(pack)
           callback(error)
     else
-      callback('Missing required tag to publish')
+      callback('A version, tag, or new package name is required')

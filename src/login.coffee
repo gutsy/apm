@@ -1,8 +1,7 @@
 _ = require 'underscore-plus'
-optimist = require 'optimist'
+yargs = require 'yargs'
 Q = require 'q'
 read = require 'read'
-request = require 'request'
 open = require 'open'
 
 auth = require './auth'
@@ -10,10 +9,17 @@ Command = require './command'
 
 module.exports =
 class Login extends Command
+  @getTokenOrLogin: (callback) ->
+    auth.getToken (error, token) ->
+      if error?
+        new Login().run({callback, commandArgs: []})
+      else
+        callback(null, token)
+
   @commandNames: ['login']
 
   parseOptions: (argv) ->
-    options = optimist(argv)
+    options = yargs(argv).wrap(100)
 
     options.usage """
       Usage: apm login
@@ -22,11 +28,12 @@ class Login extends Command
       be used to identify you when publishing packages to atom.io.
     """
     options.alias('h', 'help').describe('help', 'Print this usage message')
+    options.string('token').describe('token', 'atom.io API token')
 
   run: (options) ->
     {callback} = options
     options = @parseOptions(options.commandArgs)
-    Q(user: options.argv.user)
+    Q(token: options.argv.token)
       .then(@welcomeMessage)
       .then(@openURL)
       .then(@getToken)
@@ -38,10 +45,9 @@ class Login extends Command
     readPromise = Q.denodeify(read)
     readPromise(options)
 
-  getUserAgent: ->
-    "AtomPackageManager/#{require('../package.json').version}"
-
   welcomeMessage: (state) =>
+    return Q(state) if state.token
+
     welcome = """
       Welcome to Atom!
 
@@ -55,7 +61,9 @@ class Login extends Command
 
     @prompt({prompt: "Press [Enter] to open your account page on Atom.io."})
 
-  openURL: ->
+  openURL: (state) ->
+    return Q(state) if state.token
+
     open('https://atom.io/account')
 
   getToken: (state) =>
@@ -67,7 +75,9 @@ class Login extends Command
         Q(state)
 
   saveToken: ({token}) =>
+    throw new Error("Token is required") unless token
+
     process.stdout.write('Saving token to Keychain ')
     auth.saveToken(token)
-    process.stdout.write '\u2713\n'.green
+    @logSuccess()
     Q(token)

@@ -1,13 +1,14 @@
 path = require 'path'
 
-optimist = require 'optimist'
+yargs = require 'yargs'
 
-config = require './config'
+Command = require './command'
+config = require './apm'
 fs = require './fs'
 tree = require './tree'
 
 module.exports =
-class Links
+class Links extends Command
   @commandNames: ['linked', 'links', 'lns']
 
   constructor: ->
@@ -15,7 +16,7 @@ class Links
     @packagesPath = path.join(config.getAtomDirectory(), 'packages')
 
   parseOptions: (argv) ->
-    options = optimist(argv)
+    options = yargs(argv).wrap(100)
     options.usage """
 
       Usage: apm links
@@ -24,8 +25,6 @@ class Links
       ~/.atom/dev/packages.
     """
     options.alias('h', 'help').describe('help', 'Print this usage message')
-
-  showHelp: (argv) -> @parseOptions(argv).showHelp()
 
   getDevPackagePath: (packageName) -> path.join(@devPackagesPath, packageName)
 
@@ -41,13 +40,16 @@ class Links
   logLinks: (directoryPath) ->
     links = @getSymlinks(directoryPath)
     console.log "#{directoryPath.cyan} (#{links.length})"
-    tree links, emptyMessage: '(no links)', (link) =>
+    tree links, emptyMessage: '(no links)', (link) ->
       try
         realpath = fs.realpathSync(link)
       catch error
         realpath = '???'.red
       "#{path.basename(link).yellow} -> #{realpath}"
 
-  run: ->
+  run: (options) ->
+    {callback} = options
+
     @logLinks(@devPackagesPath)
     @logLinks(@packagesPath)
+    callback()

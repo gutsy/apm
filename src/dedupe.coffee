@@ -2,9 +2,9 @@ path = require 'path'
 
 async = require 'async'
 _ = require 'underscore-plus'
-optimist = require 'optimist'
+yargs = require 'yargs'
 
-config = require './config'
+config = require './apm'
 Command = require './command'
 fs = require './fs'
 
@@ -17,10 +17,10 @@ class Dedupe extends Command
     @atomPackagesDirectory = path.join(@atomDirectory, 'packages')
     @atomNodeDirectory = path.join(@atomDirectory, '.node-gyp')
     @atomNpmPath = require.resolve('npm/bin/npm-cli')
-    @atomNodeGypPath = require.resolve('node-gyp/bin/node-gyp')
+    @atomNodeGypPath = require.resolve('npm/node_modules/node-gyp/bin/node-gyp')
 
   parseOptions: (argv) ->
-    options = optimist(argv)
+    options = yargs(argv).wrap(100)
     options.usage """
 
       Usage: apm dedupe [<package_name>...]
@@ -33,43 +33,45 @@ class Dedupe extends Command
 
   installNode: (callback) ->
     installNodeArgs = ['install']
-    installNodeArgs.push("--target=#{config.getNodeVersion()}")
-    installNodeArgs.push("--dist-url=#{config.getNodeUrl()}")
+    installNodeArgs.push("--target=#{@electronVersion}")
+    installNodeArgs.push("--dist-url=#{config.getElectronUrl()}")
     installNodeArgs.push('--arch=ia32')
+    installNodeArgs.push('--ensure')
 
     env = _.extend({}, process.env, HOME: @atomNodeDirectory)
     env.USERPROFILE = env.HOME if config.isWin32()
 
     fs.makeTreeSync(@atomDirectory)
-    @fork @atomNodeGypPath, installNodeArgs, {env, cwd: @atomDirectory}, (code, stderr='', stdout='') ->
-      if code is 0
-        callback()
-      else
-        callback("#{stdout}\n#{stderr}")
+    config.loadNpm (error, npm) =>
+      # node-gyp doesn't currently have an option for this so just set the
+      # environment variable to bypass strict SSL
+      # https://github.com/TooTallNate/node-gyp/issues/448
+      useStrictSsl = npm.config.get('strict-ssl') ? true
+      env.NODE_TLS_REJECT_UNAUTHORIZED = 0 unless useStrictSsl
 
-  # Private
+      # Pass through configured proxy to node-gyp
+      proxy = npm.config.get('https-proxy') or npm.config.get('proxy')
+      installNodeArgs.push("--proxy=#{proxy}") if proxy
+
+      @fork @atomNodeGypPath, installNodeArgs, {env, cwd: @atomDirectory}, (code, stderr='', stdout='') ->
+        if code is 0
+          callback()
+        else
+          callback("#{stdout}\n#{stderr}")
+
   getVisualStudioFlags: ->
-    return null unless config.isWin32()
-
-    if config.isVs2010Installed()
-      '--msvs_version=2010'
-    else
-      throw new Error('You must have Visual Studio 2010 installed')
+    if vsVersion = config.getInstalledVisualStudioFlag()
+      "--msvs_version=#{vsVersion}"
 
   dedupeModules: (options, callback) ->
     process.stdout.write 'Deduping modules '
 
-    @forkDedupeCommand options, (code, stderr='', stdout='') =>
-      if code is 0
-        process.stdout.write '\u2713\n'.green
-        callback()
-      else
-        process.stdout.write '\u2717\n'.red
-        callback("#{stdout}\n#{stderr}")
+    @forkDedupeCommand options, (args...) =>
+      @logCommandResults(callback, args...)
 
   forkDedupeCommand: (options, callback) ->
-    dedupeArgs = ['--userconfig', config.getUserConfigPath(), 'dedupe']
-    dedupeArgs.push("--target=#{config.getNodeVersion()}")
+    dedupeArgs = ['--globalconfig', config.getGlobalConfigPath(), '--userconfig', config.getUserConfigPath(), 'dedupe']
+    dedupeArgs.push("--target=#{@electronVersion}")
     dedupeArgs.push('--arch=ia32')
     dedupeArgs.push('--silent') if options.argv.silent
     dedupeArgs.push('--quiet') if options.argv.quiet
@@ -91,12 +93,14 @@ class Dedupe extends Command
     fs.makeTreeSync(@atomNodeDirectory)
 
   run: (options) ->
-    {callback} = options
+    {callback, cwd} = options
     options = @parseOptions(options.commandArgs)
+    options.cwd = cwd
 
     @createAtomDirectories()
 
     commands = []
+    commands.push (callback) => @loadInstalledAtomMetadata(callback)
     commands.push (callback) => @installNode(callback)
     commands.push (callback) => @dedupeModules(options, callback)
     async.waterfall commands, callback
